@@ -7,7 +7,7 @@ image:
 replicaCount: 1
 
 service:
-  type: ClusterIP
+  type: LoadBalancer
   ports:
   - port: 8080
     name: http

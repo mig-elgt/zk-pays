@@ -12,7 +12,3 @@ profiles:
               chartPath: helm/payments
               valuesFiles:
                 - helm/payments/values.yaml
-              # values:
-              #   "image.repository": petstore/frontend
-              # setValues:
-              #   "image.tag": ""
