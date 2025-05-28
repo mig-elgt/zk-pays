@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "payments.name" . }}
+  labels:
+{{ include "payments.labels.standard" . | indent 4 }}
+    {{- range $key, $val := .Values.labels }}
+    {{ $key }}: {{ $val }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  strategy:
+{{ toYaml .Values.strategy | indent 4 }}
+  selector:
+    matchLabels:
+      app: {{ include "payments.name" . }}
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "payments.name" . }}
+        release: {{ .Release.Name }}
+        {{- range $key, $val := .Values.labels }}
+        {{ $key }}: {{ $val }}
+        {{- end }}
+    spec:
+      containers:
+      - name: {{ .Chart.Name }}
+        # image: "{{.Values.image.registry}}/{{.Values.image.repository}}:{{.Values.image.tag}}"
+        image: {{ .Values.image.repository  }}{{ if .Values.image.tag  }}:{{ .Values.image.tag  }}{{ end  }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        {{- range $key, $val := .Values.service.ports }}
+        - containerPort: {{ $val.port }}
+        {{- end }}
+        env:
+        - name: ENVIRONMENT
+          value: {{ .Values.labels.environment }}
+        - name: PG_HOST
+          value: {{ .Values.database.hostname | quote }}
+        - name: PG_PORT
+          value: {{ .Values.database.port | quote }}
+        - name: PG_USER
+          value: {{ .Values.database.user }}
+        - name: PG_PASSWORD
+          value: {{ .Values.database.password }}
+        - name: PG_DB
+          value: {{ .Values.database.db }}
+        - name: ZK_HOST
+          value: {{ .Values.zookeeper.hostname | quote }}
+        - name: ZK_PORT
+          value: {{ .Values.zookeeper.port | quote }}

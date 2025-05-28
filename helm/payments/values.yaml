@@ -1,0 +1,29 @@
+image:
+  registry: gcr.io
+  repository: zookeeper/payments
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    name: http
+
+labels:
+  tier: backend
+  environment: dev
+
+
+database:
+  hostname: postgres-postgresql
+  db: postgres
+  port: 5432
+  user: postgres
+  password: foobar
+
+zookeeper:
+  hostname: zookeeper 
+  port: 2181

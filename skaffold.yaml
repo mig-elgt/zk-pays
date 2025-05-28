@@ -1,0 +1,18 @@
+apiVersion: skaffold/v2beta26
+kind: Config
+profiles:
+  - name: minikube
+    build:
+      artifacts:
+        - image: zookeeper/payments
+    deploy:
+       helm:
+          releases:
+            - name: payments
+              chartPath: helm/payments
+              valuesFiles:
+                - helm/payments/values.yaml
+              # values:
+              #   "image.repository": petstore/frontend
+              # setValues:
+              #   "image.tag": ""
