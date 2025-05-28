@@ -15,12 +15,12 @@ import (
 )
 
 type handler struct {
-	client  *zk.Conn
-	storage postgres.StorageService
+	zookeeper *zk.Conn
+	storage   postgres.StorageService
 }
 
-func New(client *zk.Conn, storage postgres.StorageService) *handler {
-	return &handler{client, storage}
+func New(zookeeper *zk.Conn, storage postgres.StorageService) *handler {
+	return &handler{zookeeper, storage}
 }
 
 var ErrNodeAlreadyExists = errors.New("zk: node already exists")
@@ -85,10 +85,10 @@ func (h *handler) Capture(c *gin.Context) {
 
 	var lockNodePath string
 
-	_, err := h.client.Create(transactionIdLock, []byte(reqID.String()), zk.FlagPersistent, worldACL)
+	_, err := h.zookeeper.Create(transactionIdLock, []byte(reqID.String()), zk.FlagPersistent, worldACL)
 	if err != nil {
 		if err.Error() == ErrNodeAlreadyExists.Error() {
-			lockNodePath, err = h.client.Create(fmt.Sprintf("%s/capture-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
+			lockNodePath, err = h.zookeeper.Create(fmt.Sprintf("%s/capture-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
 			if err != nil {
 				fmt.Println("could not create lock capture node", err)
 				c.JSON(http.StatusInternalServerError, err)
@@ -99,7 +99,7 @@ func (h *handler) Capture(c *gin.Context) {
 			return
 		}
 	} else {
-		lockNodePath, err = h.client.Create(fmt.Sprintf("%s/capture-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
+		lockNodePath, err = h.zookeeper.Create(fmt.Sprintf("%s/capture-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
 		if err != nil {
 			fmt.Println("could not create lock capture node", err)
 			c.JSON(http.StatusInternalServerError, err)
@@ -171,7 +171,7 @@ func (h *handler) Capture(c *gin.Context) {
 	}
 
 	// Release lock
-	if err := h.client.Delete(lockNodePath, 0); err != nil {
+	if err := h.zookeeper.Delete(lockNodePath, 0); err != nil {
 		fmt.Println("could not delete znode", err)
 		c.JSON(http.StatusInternalServerError, err)
 		return
@@ -182,7 +182,7 @@ func (h *handler) Capture(c *gin.Context) {
 
 func (h *handler) lock(ch chan interface{}, rootNode string, reqID uuid.UUID) {
 	fmt.Println("handle with req ID: ", rootNode, reqID)
-	children, _, err := h.client.Children(rootNode)
+	children, _, err := h.zookeeper.Children(rootNode)
 	if err != nil {
 		fmt.Println("could not get children watcher", err)
 		ch <- err
@@ -193,7 +193,7 @@ func (h *handler) lock(ch chan interface{}, rootNode string, reqID uuid.UUID) {
 
 	fmt.Println("got children", children)
 	childrenNode := fmt.Sprintf("%s/%s", rootNode, children[0])
-	data, _, event, err := h.client.GetW(childrenNode)
+	data, _, event, err := h.zookeeper.GetW(childrenNode)
 	if err != nil {
 		ch <- err
 		return
@@ -227,10 +227,10 @@ func (h *handler) Refund(c *gin.Context) {
 
 	var lockNodePath string
 
-	_, err := h.client.Create(transactionIdLock, []byte(reqID.String()), zk.FlagPersistent, worldACL)
+	_, err := h.zookeeper.Create(transactionIdLock, []byte(reqID.String()), zk.FlagPersistent, worldACL)
 	if err != nil {
 		if err.Error() == ErrNodeAlreadyExists.Error() {
-			lockNodePath, err = h.client.Create(fmt.Sprintf("%s/refund-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
+			lockNodePath, err = h.zookeeper.Create(fmt.Sprintf("%s/refund-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
 			if err != nil {
 				fmt.Println("could not create lock capture node", err)
 				c.JSON(http.StatusInternalServerError, err)
@@ -241,7 +241,7 @@ func (h *handler) Refund(c *gin.Context) {
 			return
 		}
 	} else {
-		lockNodePath, err = h.client.Create(fmt.Sprintf("%s/refund-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
+		lockNodePath, err = h.zookeeper.Create(fmt.Sprintf("%s/refund-", transactionIdLock), []byte(reqID.String()), zk.FlagEphemeralSequential, worldACL)
 		if err != nil {
 			fmt.Println("could not create lock capture node", err)
 			c.JSON(http.StatusInternalServerError, err)
@@ -312,7 +312,7 @@ func (h *handler) Refund(c *gin.Context) {
 		}
 	}
 
-	if err := h.client.Delete(lockNodePath, 0); err != nil {
+	if err := h.zookeeper.Delete(lockNodePath, 0); err != nil {
 		fmt.Println("could not delete znode", err)
 		c.JSON(http.StatusInternalServerError, err)
 		return
