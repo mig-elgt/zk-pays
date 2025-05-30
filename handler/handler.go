@@ -52,7 +52,7 @@ func (h *handler) Purchase(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, payload)
+	c.JSON(http.StatusCreated, gin.H{"transaction_id": transactionID, "status": "authorized", "amount": payload.Amount})
 }
 
 func (h *handler) GetInvoice(c *gin.Context) {
@@ -177,35 +177,7 @@ func (h *handler) Capture(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, invoiceStatus)
-}
-
-func (h *handler) lock(ch chan interface{}, rootNode string, reqID uuid.UUID) {
-	fmt.Println("handle with req ID: ", rootNode, reqID)
-	children, _, err := h.zookeeper.Children(rootNode)
-	if err != nil {
-		fmt.Println("could not get children watcher", err)
-		ch <- err
-		return
-	}
-
-	sort.Strings(children)
-
-	fmt.Println("got children", children)
-	childrenNode := fmt.Sprintf("%s/%s", rootNode, children[0])
-	data, _, event, err := h.zookeeper.GetW(childrenNode)
-	if err != nil {
-		ch <- err
-		return
-	}
-
-	fmt.Println("znode data: ", string(data), reqID)
-	if string(data) == reqID.String() {
-		ch <- "continue with handle process"
-		return
-	}
-	<-event
-	h.lock(ch, rootNode, reqID)
+	c.JSON(http.StatusOK, "capture applied")
 }
 
 func (h *handler) Refund(c *gin.Context) {
@@ -318,5 +290,49 @@ func (h *handler) Refund(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, invoiceStatus)
+	c.JSON(http.StatusOK, "refund applied")
+}
+
+func (h *handler) lock(ch chan interface{}, rootNode string, reqID uuid.UUID) {
+	fmt.Println("handle with req ID: ", rootNode, reqID)
+
+	children, _, err := h.zookeeper.Children(rootNode)
+	if err != nil {
+		fmt.Println("could not get children watcher", err)
+		ch <- err
+		return
+	}
+
+	sort.Strings(children)
+
+	var prevNode string
+	for _, child := range children {
+		data, _, err := h.zookeeper.Get(fmt.Sprintf("%s/%s", rootNode, child))
+		if err != nil {
+			ch <- err
+			return
+		}
+		if string(data) == reqID.String() {
+			break
+		}
+		prevNode = child
+	}
+
+	if prevNode == "" {
+		ch <- "continue with handle process"
+		return
+	}
+
+	_, _, event, err := h.zookeeper.GetW(fmt.Sprintf("%s/%s", rootNode, prevNode))
+	if err != nil {
+		ch <- err
+		return
+	}
+
+	for eventType := range event {
+		if eventType.Type == zk.EventNodeDeleted {
+			ch <- "continue with handle process"
+			return
+		}
+	}
 }
