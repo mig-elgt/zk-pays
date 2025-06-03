@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -335,4 +336,90 @@ func (h *handler) lock(ch chan interface{}, rootNode string, reqID uuid.UUID) {
 			return
 		}
 	}
+}
+
+func (h *handler) CaptureV2(c *gin.Context) {
+	var payload struct {
+		Amout int `json:"amount"`
+	}
+
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		fmt.Println("could not bind json")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	reqID := uuid.NewV4()
+	transactionID := c.Param("transaction_id")
+
+	lockID, err := strconv.Atoi(transactionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, err)
+		return
+	}
+
+	err = h.storage.AcquireLock(lockID, reqID.String())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, err)
+		return
+	}
+
+	defer func() {
+		if err := h.storage.ReleaseLock(lockID, reqID.String()); err != nil {
+			fmt.Println("could not release lock", err)
+			return
+		}
+		fmt.Printf("release lock: %v; reqID: %v\n", lockID, reqID)
+	}()
+
+	fmt.Println("handle psp capture operation", reqID)
+	time.Sleep(2 * time.Second)
+
+	if err := h.storage.CreateTransaction(payload.Amout, "captured", transactionID); err != nil {
+		c.JSON(http.StatusInternalServerError, err)
+		return
+	}
+
+	// Get Invoice by Transaction ID
+	invoice, err := h.storage.GetInvoice(transactionID)
+	if err != nil {
+		fmt.Println("could not get invoice", err, transactionID)
+		c.JSON(http.StatusInternalServerError, err)
+		return
+	}
+
+	fmt.Println("got invoice", invoice)
+
+	// Get Transactions by Transaction ID
+	txns, err := h.storage.GetTransactions(transactionID, "captured")
+	if err != nil {
+		fmt.Println("could not get transactions by transaction_id", err, transactionID)
+		c.JSON(http.StatusInternalServerError, err)
+		return
+	}
+
+	var captureTotalAmount int
+	for _, txn := range txns {
+		captureTotalAmount += txn.Amount
+	}
+
+	fmt.Println("currently capture amount", captureTotalAmount)
+	invoiceStatus := "captured"
+
+	if invoice.Amount == captureTotalAmount {
+		// Update invoice to captured
+		if err := h.storage.UpdateInvoiceStatus(invoiceStatus, transactionID); err != nil {
+			c.JSON(http.StatusInternalServerError, err)
+			return
+		}
+	} else {
+		// Update invoice to partial_captured
+		invoiceStatus = "partial_capturing"
+		if err := h.storage.UpdateInvoiceStatus(invoiceStatus, transactionID); err != nil {
+			c.JSON(http.StatusInternalServerError, err)
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, "capture applied")
 }

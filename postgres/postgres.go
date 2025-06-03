@@ -3,6 +3,7 @@ package postgres
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/pkg/errors"
@@ -14,6 +15,10 @@ type StorageService interface {
 	GetInvoice(transactionID string) (*Invoice, error)
 	GetTransactions(transactionID, status string) ([]*Transaction, error)
 	UpdateInvoiceStatus(status, transactionID string) error
+
+	AcquireLock(lockID int, reqID string) error
+	ReleaseLock(lockID int, reqID string) error
+
 	Close() error
 }
 
@@ -21,7 +26,7 @@ type postgres struct {
 	DB *sql.DB
 }
 
-func New(host, port, user, password, dbName string) (StorageService, error) {
+func New(host, port, user, password, dbName string) (*postgres, error) {
 	// Connect Postgres
 	connect := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbName)
 	db, err := sql.Open("postgres", connect)
@@ -129,4 +134,30 @@ func (p *postgres) UpdateInvoiceStatus(status, transactionID string) error {
 
 func (p *postgres) Close() error {
 	return p.DB.Close()
+}
+
+func (p *postgres) AcquireLock(lockID int, reqID string) error {
+	var lockObtained bool
+	for {
+		err := p.DB.QueryRow(fmt.Sprintf(`SELECT pg_try_advisory_lock(%d)`, lockID)).
+			Scan(&lockObtained)
+		if err != nil {
+			return fmt.Errorf("could not acquire lock: %v", err)
+		}
+		if lockObtained {
+			fmt.Printf("i got the lock: %v; reqID: %v\n", lockID, reqID)
+			break
+		}
+		fmt.Printf("waiting to acquire lock: %v; reqID: %v\n", lockID, reqID)
+		time.Sleep(time.Second * 2)
+	}
+	return nil
+}
+
+func (p *postgres) ReleaseLock(lockID int, reqID string) error {
+	_, err := p.DB.Exec(fmt.Sprintf("SELECT pg_advisory_unlock(%d)", lockID))
+	if err != nil {
+		return fmt.Errorf("could no release lock: %v; %v", lockID, err)
+	}
+	return err
 }
