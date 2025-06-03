@@ -49,10 +49,11 @@ func main() {
 
 	router.POST("/purchase/:transaction_id", h.Purchase)
 	router.POST("/capture/:transaction_id", h.Capture)
-	router.POST("/api/v2/capture/:transaction_id", h.CaptureV2)
 	router.POST("/refund/:transaction_id", h.Refund)
 	router.GET("/invoices/:transaction_id", h.GetInvoice)
-	router.POST("/api/v2/process/:id", handleProcess)
+
+	router.POST("/api/v2/capture/:transaction_id", h.CaptureV2)
+	router.POST("/api/v3/capture/:transaction_id", h.CaptureV3)
 
 	router.Run(":8080")
 }

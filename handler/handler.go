@@ -423,3 +423,30 @@ func (h *handler) CaptureV2(c *gin.Context) {
 
 	c.JSON(http.StatusOK, "capture applied")
 }
+
+func (h *handler) CaptureV3(c *gin.Context) {
+	id := c.Param("transaction_id")
+	transactionID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var payload struct {
+		Amount int `json:"amount"`
+	}
+
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		fmt.Println("could not bind json")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.storage.CaptureWithLock(payload.Amount, transactionID); err != nil {
+		fmt.Println("could not capture with lock")
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "capture applied"})
+}

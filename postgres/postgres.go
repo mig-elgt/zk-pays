@@ -19,6 +19,8 @@ type StorageService interface {
 	AcquireLock(lockID int, reqID string) error
 	ReleaseLock(lockID int, reqID string) error
 
+	CaptureWithLock(amount int, transactionID int64) error
+
 	Close() error
 }
 
@@ -160,4 +162,101 @@ func (p *postgres) ReleaseLock(lockID int, reqID string) error {
 		return fmt.Errorf("could no release lock: %v; %v", lockID, err)
 	}
 	return err
+}
+
+func (p *postgres) CaptureWithLock(amount int, transactionID int64) error {
+	tx, err := p.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Acquire advisory lock (transaction-scoped)
+	_, err = tx.Exec("SELECT pg_advisory_xact_lock($1)", transactionID)
+	if err != nil {
+		return err
+	}
+
+	// Critical section (simulate insert or update)
+	var invoice Invoice
+	if err := p.DB.QueryRow("SELECT status, amount FROM invoices WHERE transaction_id=$1;", transactionID).
+		Scan(&invoice.Status, &invoice.Amount); err != nil {
+		return err
+	}
+
+	// Get invoice transactions
+	rows, err := tx.Query("SELECT amount FROM transactions WHERE transaction_id=$1 AND status=$2;", transactionID, "capturing")
+	if err != nil {
+		return err
+	}
+
+	// Calculate total captured amount
+	var balanceAmount, transactionCount int
+	for rows.Next() {
+		var amount int
+		if err := rows.Scan(&amount); err != nil {
+			return err
+		}
+		balanceAmount += amount
+		transactionCount++
+	}
+
+	fmt.Println("balance amount", balanceAmount, "transaction count", transactionCount)
+
+	if balanceAmount >= invoice.Amount {
+		return fmt.Errorf("invoice already fully captured")
+	}
+
+	totalRequestedAmount := balanceAmount + amount
+	if totalRequestedAmount > invoice.Amount {
+		return fmt.Errorf("capture_would_exceed_invoice_amount")
+	}
+
+	isFinalCapture := totalRequestedAmount == invoice.Amount
+
+	if !isFinalCapture {
+		// Create a new capture transaction
+		_, err = tx.Exec("INSERT INTO transactions(status, amount, transaction_id) VALUES ($1, $2, $3);", "capturing", amount, transactionID)
+		if err != nil {
+			return fmt.Errorf("could not create transaction: %v", err)
+		}
+	}
+
+	// Only perform external capture when it's the final capture
+	if isFinalCapture {
+		fmt.Println("performing final capture thorugh transaction service (psp)")
+		fmt.Println("waiting PSP response")
+		// Create the final capture transaction
+		_, err = tx.Exec("INSERT INTO transactions(status, amount, transaction_id) VALUES ($1, $2, $3);", "capturing", amount, transactionID)
+		if err != nil {
+			return fmt.Errorf("could not create transaction: %v", err)
+		}
+		// Update invoice status from capturing to captured
+		_, err = tx.Exec("UPDATE invoices SET status=$1 WHERE transaction_id=$2;", "captured", transactionID)
+		if err != nil {
+			return fmt.Errorf("could not update invoice status: %v", err)
+		}
+
+		// Commit transaction (automatically releases lock)
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+
+		return nil
+	} else {
+		// Update invoice status to capturing if not already
+		if invoice.Status != "capturing" {
+			_, err := tx.Exec("UPDATE invoices SET status=$1 WHERE transaction_id=$2;", "capturing", transactionID)
+			if err != nil {
+				return fmt.Errorf("could not update invoice status: %v", err)
+			}
+		}
+	}
+
+	// Commit transaction (automatically releases lock)
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
 }
