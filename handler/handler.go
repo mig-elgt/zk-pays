@@ -442,10 +442,26 @@ func (h *handler) CaptureV3(c *gin.Context) {
 		return
 	}
 
-	if err := h.storage.CaptureWithLock(payload.Amount, transactionID); err != nil {
+	isFinalCapture, err := h.storage.CaptureWithLock(payload.Amount, transactionID)
+	if err != nil {
 		fmt.Println("could not capture with lock")
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		return
+	}
+
+	if isFinalCapture {
+		fmt.Println("performing final capture thorugh transaction service (psp)")
+		fmt.Println("waiting PSP response")
+		if err := h.storage.CreateTransaction(payload.Amount, "capturing", id); err != nil {
+			fmt.Println("could not create transaction: ", err)
+			c.JSON(http.StatusInternalServerError, err)
+			return
+		}
+		if err := h.storage.UpdateInvoiceStatus("captured", id); err != nil {
+			fmt.Println("could not update invoice: ", err)
+			c.JSON(http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "capture applied"})

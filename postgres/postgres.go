@@ -1,13 +1,27 @@
 package postgres
 
 import (
-	"database/sql"
 	"fmt"
-	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/pkg/errors"
+	psql "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
+
+type Invoice struct {
+	ID            uint   `gorm:"primaryKey"`
+	TransactionID string `gorm:"column:transaction_id"`
+	Status        string `gorm:"column:status"`
+	Amount        int    `gorm:"column:amount"`
+}
+
+type Transaction struct {
+	ID            uint   `gorm:"primaryKey"`
+	TransactionID string `gorm:"column:transaction_id"`
+	Status        string `gorm:"column:status"`
+	Amount        int    `gorm:"column:amount"`
+}
 
 type StorageService interface {
 	CreateInvoice(amount int, status, transactionID string) error
@@ -19,244 +33,185 @@ type StorageService interface {
 	AcquireLock(lockID int, reqID string) error
 	ReleaseLock(lockID int, reqID string) error
 
-	CaptureWithLock(amount int, transactionID int64) error
+	CaptureWithLock(amount int, transactionID int64) (bool, error)
 
 	Close() error
 }
 
 type postgres struct {
-	DB *sql.DB
+	DB *gorm.DB
 }
 
 func New(host, port, user, password, dbName string) (*postgres, error) {
 	// Connect Postgres
 	connect := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbName)
-	db, err := sql.Open("postgres", connect)
+	db, err := gorm.Open(psql.Open(connect), &gorm.Config{})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed Open")
 	}
-
-	// Ping Connection
-	if err := db.Ping(); err != nil {
-		return nil, errors.Wrap(err, "failed Ping")
-	}
-
-	// Create table if not exists
-	strQuery := `
-	CREATE TABLE IF NOT EXISTS invoices (
-		id SERIAL PRIMARY KEY,
-		transaction_id VARCHAR,
-		status VARCHAR,
-		amount INTEGER,
-		created_at TIMESTAMP DEFAULT NOW()
-	);
-	CREATE TABLE IF NOT EXISTS transactions (
-		id SERIAL PRIMARY KEY,
-		transaction_id VARCHAR,
-		status VARCHAR,
-		amount INTEGER,
-		created_at TIMESTAMP DEFAULT NOW()
-	);
-	`
-	_, err = db.Exec(strQuery)
-	if err != nil {
+	if err := db.AutoMigrate(&Invoice{}, &Transaction{}); err != nil {
 		return nil, err
 	}
 	return &postgres{db}, nil
 }
 
 func (p *postgres) CreateInvoice(amount int, status, transactionID string) error {
-	query := `INSERT INTO invoices(status, amount, transaction_id) VALUES ($1, $2, $3);`
-	if _, err := p.DB.Exec(query, status, amount, transactionID); err != nil {
-		return errors.Wrap(err, "could not exec sql query")
+	tx := p.DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Create(&Invoice{Status: status, Amount: amount, TransactionID: transactionID}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Commit if all operations succeed
+	if err := tx.Commit().Error; err != nil {
+		return err
 	}
 	return nil
 }
 
 func (p *postgres) CreateTransaction(amount int, status, transactionID string) error {
-	query := `INSERT INTO transactions(status, amount, transaction_id) VALUES ($1, $2, $3);`
-	if _, err := p.DB.Exec(query, status, amount, transactionID); err != nil {
-		return errors.Wrap(err, "could not exec sql query")
+	tx := p.DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Create(&Transaction{Status: status, Amount: amount, TransactionID: transactionID}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Commit if all operations succeed
+	if err := tx.Commit().Error; err != nil {
+		return err
 	}
 	return nil
 }
 
-type Transaction struct {
-	Status string
-	Amount int
-	Kind   string
-}
-
-type Invoice struct {
-	Status string
-	Amount int
-}
-
 func (p *postgres) GetInvoice(transactionID string) (*Invoice, error) {
 	var invoice Invoice
-	if err := p.DB.QueryRow("SELECT status, amount FROM invoices WHERE transaction_id=$1;", transactionID).
-		Scan(&invoice.Status, &invoice.Amount); err != nil {
+	if err := p.DB.Where("transaction_id = ?", transactionID).First(&invoice).Error; err != nil {
 		return nil, err
 	}
 	return &invoice, nil
 }
 
 func (p *postgres) GetTransactions(transactionID, status string) ([]*Transaction, error) {
-	list := []*Transaction{}
-	rows, err := p.DB.Query("SELECT status, amount FROM transactions WHERE transaction_id=$1 AND status=$2;", transactionID, status)
-	if err != nil {
+	var transactions []*Transaction
+	if err := p.DB.Where(&Transaction{TransactionID: transactionID, Status: status}).Find(&transactions).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var txn Transaction
-		if err := rows.Scan(&txn.Status, &txn.Amount); err != nil {
-			return nil, err
-		}
-		list = append(list, &txn)
-	}
-	return list, nil
+	return transactions, nil
 }
 
 func (p *postgres) UpdateInvoiceStatus(status, transactionID string) error {
-	query := ("UPDATE invoices SET status=$1 WHERE transaction_id=$2;")
-	result, err := p.DB.Exec(query, status, transactionID)
-	if err != nil {
-		return errors.Wrapf(err, "failed to execute query")
+	tx := p.DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
 	}
-	total, err := result.RowsAffected()
-	if err != nil {
-		return errors.Wrap(err, "could not get rows affected")
+	if err := tx.Model(&Invoice{}).
+		Where("transaction_id = ?", transactionID).
+		Update("status", status).Error; err != nil {
+		tx.Rollback()
+		return err
 	}
-	if total == 0 {
-		return fmt.Errorf("invoice not found")
-	}
-	return nil
+	return tx.Commit().Error
 }
 
 func (p *postgres) Close() error {
-	return p.DB.Close()
+	sqlDB, err := p.DB.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
 func (p *postgres) AcquireLock(lockID int, reqID string) error {
-	var lockObtained bool
-	for {
-		err := p.DB.QueryRow(fmt.Sprintf(`SELECT pg_try_advisory_lock(%d)`, lockID)).
-			Scan(&lockObtained)
-		if err != nil {
-			return fmt.Errorf("could not acquire lock: %v", err)
-		}
-		if lockObtained {
-			fmt.Printf("i got the lock: %v; reqID: %v\n", lockID, reqID)
-			break
-		}
-		fmt.Printf("waiting to acquire lock: %v; reqID: %v\n", lockID, reqID)
-		time.Sleep(time.Second * 2)
-	}
-	return nil
+	panic("not impl")
+	// var lockObtained bool
+	// for {
+	// 	err := p.DB.QueryRow(fmt.Sprintf(`SELECT pg_try_advisory_lock(%d)`, lockID)).
+	// 		Scan(&lockObtained)
+	// 	if err != nil {
+	// 		return fmt.Errorf("could not acquire lock: %v", err)
+	// 	}
+	// 	if lockObtained {
+	// 		fmt.Printf("i got the lock: %v; reqID: %v\n", lockID, reqID)
+	// 		break
+	// 	}
+	// 	fmt.Printf("waiting to acquire lock: %v; reqID: %v\n", lockID, reqID)
+	// 	time.Sleep(time.Second * 2)
+	// }
+	// return nil
 }
 
 func (p *postgres) ReleaseLock(lockID int, reqID string) error {
-	_, err := p.DB.Exec(fmt.Sprintf("SELECT pg_advisory_unlock(%d)", lockID))
-	if err != nil {
-		return fmt.Errorf("could no release lock: %v; %v", lockID, err)
-	}
-	return err
+	panic("not impl")
+	// _, err := p.DB.Exec(fmt.Sprintf("SELECT pg_advisory_unlock(%d)", lockID))
+	// if err != nil {
+	// 	return fmt.Errorf("could no release lock: %v; %v", lockID, err)
+	// }
+	// return err
 }
 
-func (p *postgres) CaptureWithLock(amount int, transactionID int64) error {
-	tx, err := p.DB.Begin()
-	if err != nil {
-		return err
+func (p *postgres) CaptureWithLock(amount int, transactionID int64) (bool, error) {
+	tx := p.DB.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
 	}
-	defer tx.Rollback()
 
 	// Acquire advisory lock (transaction-scoped)
-	_, err = tx.Exec("SELECT pg_advisory_xact_lock($1)", transactionID)
-	if err != nil {
-		return err
+	var dummy string
+	if err := tx.Raw("SELECT pg_advisory_xact_lock(?)", transactionID).Scan(&dummy).Error; err != nil {
+		tx.Rollback()
+		return false, err
 	}
 
 	// Critical section (simulate insert or update)
+	transactionIDStr := fmt.Sprintf("%v", transactionID)
 	var invoice Invoice
-	if err := p.DB.QueryRow("SELECT status, amount FROM invoices WHERE transaction_id=$1;", transactionID).
-		Scan(&invoice.Status, &invoice.Amount); err != nil {
-		return err
+	if err := tx.Where("transaction_id = ?", transactionIDStr).First(&invoice).Error; err != nil {
+		return false, err
 	}
 
 	// Get invoice transactions
-	rows, err := tx.Query("SELECT amount FROM transactions WHERE transaction_id=$1 AND status=$2;", transactionID, "capturing")
-	if err != nil {
-		return err
+	var transactions []*Transaction
+	if err := tx.Where("transaction_id = ?", transactionIDStr).Where("status = ?", "capturing").Find(&transactions).Error; err != nil {
+		return false, err
 	}
 
 	// Calculate total captured amount
 	var balanceAmount, transactionCount int
-	for rows.Next() {
-		var amount int
-		if err := rows.Scan(&amount); err != nil {
-			return err
-		}
-		balanceAmount += amount
+	for _, trx := range transactions {
+		balanceAmount += trx.Amount
 		transactionCount++
 	}
 
 	fmt.Println("balance amount", balanceAmount, "transaction count", transactionCount)
 
-	if balanceAmount >= invoice.Amount {
-		return fmt.Errorf("invoice already fully captured")
-	}
-
 	totalRequestedAmount := balanceAmount + amount
 	if totalRequestedAmount > invoice.Amount {
-		return fmt.Errorf("capture_would_exceed_invoice_amount")
+		return false, fmt.Errorf("capture_would_exceed_invoice_amount")
 	}
 
 	isFinalCapture := totalRequestedAmount == invoice.Amount
 
-	if !isFinalCapture {
-		// Create a new capture transaction
-		_, err = tx.Exec("INSERT INTO transactions(status, amount, transaction_id) VALUES ($1, $2, $3);", "capturing", amount, transactionID)
-		if err != nil {
-			return fmt.Errorf("could not create transaction: %v", err)
-		}
-	}
-
-	// Only perform external capture when it's the final capture
 	if isFinalCapture {
-		fmt.Println("performing final capture thorugh transaction service (psp)")
-		fmt.Println("waiting PSP response")
-		// Create the final capture transaction
-		_, err = tx.Exec("INSERT INTO transactions(status, amount, transaction_id) VALUES ($1, $2, $3);", "capturing", amount, transactionID)
-		if err != nil {
-			return fmt.Errorf("could not create transaction: %v", err)
-		}
-		// Update invoice status from capturing to captured
-		_, err = tx.Exec("UPDATE invoices SET status=$1 WHERE transaction_id=$2;", "captured", transactionID)
-		if err != nil {
-			return fmt.Errorf("could not update invoice status: %v", err)
-		}
+		return true, tx.Commit().Error
+	}
 
-		// Commit transaction (automatically releases lock)
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	// Create a new capture transaction
+	if err := tx.Create(&Transaction{Status: "capturing", Amount: amount, TransactionID: transactionIDStr}).Error; err != nil {
+		tx.Rollback()
+		return false, err
+	}
 
-		return nil
-	} else {
-		// Update invoice status to capturing if not already
-		if invoice.Status != "capturing" {
-			_, err := tx.Exec("UPDATE invoices SET status=$1 WHERE transaction_id=$2;", "capturing", transactionID)
-			if err != nil {
-				return fmt.Errorf("could not update invoice status: %v", err)
-			}
+	if invoice.Status != "capturing" {
+		if err := tx.Model(&Invoice{}).Where("transaction_id = ?", transactionIDStr).Update("status", "capturing").Error; err != nil {
+			tx.Rollback()
+			return false, err
 		}
 	}
 
-	// Commit transaction (automatically releases lock)
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+	return false, tx.Commit().Error
 
-	return nil
 }

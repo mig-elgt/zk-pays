@@ -1,4 +1,4 @@
-FROM golang:1.22 AS builder
+FROM golang:1.23 AS builder
 ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 WORKDIR /app
 COPY go.mod go.sum ./
