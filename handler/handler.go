@@ -4,6 +4,7 @@ import (
 	"distributed-look/postgres"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sort"
 	"strconv"
@@ -425,13 +426,7 @@ func (h *handler) CaptureV2(c *gin.Context) {
 }
 
 func (h *handler) CaptureV3(c *gin.Context) {
-	id := c.Param("transaction_id")
-	transactionID, err := strconv.ParseInt(id, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
-		return
-	}
-
+	transactionID := c.Param("transaction_id")
 	var payload struct {
 		Amount int `json:"amount"`
 	}
@@ -442,7 +437,9 @@ func (h *handler) CaptureV3(c *gin.Context) {
 		return
 	}
 
-	isFinalCapture, err := h.storage.CaptureWithLock(payload.Amount, transactionID)
+	lockID := generatePositiveInt64LockID(transactionID)
+
+	isFinalCapture, err := h.storage.CaptureWithLock(payload.Amount, transactionID, lockID)
 	if err != nil {
 		fmt.Println("could not capture with lock")
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
@@ -452,12 +449,12 @@ func (h *handler) CaptureV3(c *gin.Context) {
 	if isFinalCapture {
 		fmt.Println("performing final capture thorugh transaction service (psp)")
 		fmt.Println("waiting PSP response")
-		if err := h.storage.CreateTransaction(payload.Amount, "capturing", id); err != nil {
+		if err := h.storage.CreateTransaction(payload.Amount, "capturing", transactionID); err != nil {
 			fmt.Println("could not create transaction: ", err)
 			c.JSON(http.StatusInternalServerError, err)
 			return
 		}
-		if err := h.storage.UpdateInvoiceStatus("captured", id); err != nil {
+		if err := h.storage.UpdateInvoiceStatus("captured", transactionID); err != nil {
 			fmt.Println("could not update invoice: ", err)
 			c.JSON(http.StatusInternalServerError, err)
 			return
@@ -465,4 +462,11 @@ func (h *handler) CaptureV3(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "capture applied"})
+}
+
+func generatePositiveInt64LockID(input string) int64 {
+	hasher := fnv.New64a()
+	hasher.Write([]byte(input))
+	// Limit value to MaxInt64 to avoid negative numbers
+	return int64(hasher.Sum64() & 0x7FFFFFFFFFFFFFFF)
 }

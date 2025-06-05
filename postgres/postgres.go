@@ -33,7 +33,7 @@ type StorageService interface {
 	AcquireLock(lockID int, reqID string) error
 	ReleaseLock(lockID int, reqID string) error
 
-	CaptureWithLock(amount int, transactionID int64) (bool, error)
+	CaptureWithLock(amount int, transactionID string, lockID int64) (bool, error)
 
 	Close() error
 }
@@ -153,29 +153,32 @@ func (p *postgres) ReleaseLock(lockID int, reqID string) error {
 	// return err
 }
 
-func (p *postgres) CaptureWithLock(amount int, transactionID int64) (bool, error) {
+func (p *postgres) CaptureWithLock(amount int, transactionID string, lockID int64) (bool, error) {
 	tx := p.DB.Begin()
 	if tx.Error != nil {
 		return false, tx.Error
 	}
 
+	fmt.Println("performing new capture: ", transactionID, lockID)
+
 	// Acquire advisory lock (transaction-scoped)
 	var dummy string
-	if err := tx.Raw("SELECT pg_advisory_xact_lock(?)", transactionID).Scan(&dummy).Error; err != nil {
+	if err := tx.Raw("SELECT pg_advisory_xact_lock(?)", lockID).Scan(&dummy).Error; err != nil {
 		tx.Rollback()
 		return false, err
 	}
 
 	// Critical section (simulate insert or update)
-	transactionIDStr := fmt.Sprintf("%v", transactionID)
 	var invoice Invoice
-	if err := tx.Where("transaction_id = ?", transactionIDStr).First(&invoice).Error; err != nil {
+	if err := tx.Where("transaction_id = ?", transactionID).First(&invoice).Error; err != nil {
+		tx.Rollback()
 		return false, err
 	}
 
 	// Get invoice transactions
 	var transactions []*Transaction
-	if err := tx.Where("transaction_id = ?", transactionIDStr).Where("status = ?", "capturing").Find(&transactions).Error; err != nil {
+	if err := tx.Where("transaction_id = ?", transactionID).Where("status = ?", "capturing").Find(&transactions).Error; err != nil {
+		tx.Rollback()
 		return false, err
 	}
 
@@ -190,6 +193,7 @@ func (p *postgres) CaptureWithLock(amount int, transactionID int64) (bool, error
 
 	totalRequestedAmount := balanceAmount + amount
 	if totalRequestedAmount > invoice.Amount {
+		tx.Commit()
 		return false, fmt.Errorf("capture_would_exceed_invoice_amount")
 	}
 
@@ -200,13 +204,13 @@ func (p *postgres) CaptureWithLock(amount int, transactionID int64) (bool, error
 	}
 
 	// Create a new capture transaction
-	if err := tx.Create(&Transaction{Status: "capturing", Amount: amount, TransactionID: transactionIDStr}).Error; err != nil {
+	if err := tx.Create(&Transaction{Status: "capturing", Amount: amount, TransactionID: transactionID}).Error; err != nil {
 		tx.Rollback()
 		return false, err
 	}
 
 	if invoice.Status != "capturing" {
-		if err := tx.Model(&Invoice{}).Where("transaction_id = ?", transactionIDStr).Update("status", "capturing").Error; err != nil {
+		if err := tx.Model(&Invoice{}).Where("transaction_id = ?", transactionID).Update("status", "capturing").Error; err != nil {
 			tx.Rollback()
 			return false, err
 		}
