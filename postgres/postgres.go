@@ -159,26 +159,32 @@ func (p *postgres) CaptureWithLock(amount int, transactionID string, lockID int6
 		return false, tx.Error
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r) // re-throw panic after rollback
+		} else if tx.Error != nil {
+			tx.Rollback()
+		}
+	}()
+
 	fmt.Println("performing new capture: ", transactionID, lockID)
 
 	// Acquire advisory lock (transaction-scoped)
 	var dummy string
 	if err := tx.Raw("SELECT pg_advisory_xact_lock(?)", lockID).Scan(&dummy).Error; err != nil {
-		tx.Rollback()
 		return false, err
 	}
 
 	// Critical section (simulate insert or update)
 	var invoice Invoice
 	if err := tx.Where("transaction_id = ?", transactionID).First(&invoice).Error; err != nil {
-		tx.Rollback()
 		return false, err
 	}
 
 	// Get invoice transactions
 	var transactions []*Transaction
 	if err := tx.Where("transaction_id = ?", transactionID).Where("status = ?", "capturing").Find(&transactions).Error; err != nil {
-		tx.Rollback()
 		return false, err
 	}
 
@@ -193,7 +199,9 @@ func (p *postgres) CaptureWithLock(amount int, transactionID string, lockID int6
 
 	totalRequestedAmount := balanceAmount + amount
 	if totalRequestedAmount > invoice.Amount {
-		tx.Commit()
+		if err := tx.Commit().Error; err != nil {
+			return false, err
+		}
 		return false, fmt.Errorf("capture_would_exceed_invoice_amount")
 	}
 
@@ -205,13 +213,11 @@ func (p *postgres) CaptureWithLock(amount int, transactionID string, lockID int6
 
 	// Create a new capture transaction
 	if err := tx.Create(&Transaction{Status: "capturing", Amount: amount, TransactionID: transactionID}).Error; err != nil {
-		tx.Rollback()
 		return false, err
 	}
 
 	if invoice.Status != "capturing" {
 		if err := tx.Model(&Invoice{}).Where("transaction_id = ?", transactionID).Update("status", "capturing").Error; err != nil {
-			tx.Rollback()
 			return false, err
 		}
 	}
